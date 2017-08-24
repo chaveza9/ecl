@@ -1457,7 +1457,7 @@ void Ekf::resetExtVisRotMat()
 	_ev_rot_mat = quat_to_invrotmat(q_error);
 }
 
-// get the diagonal elements of the covariance matrix
+// return the quaternions for the rotation from the EKF to the External Vision system frame of reference
 void Ekf::get_ekf2ev_quaternion(float *quat)
 {
 	Quatf quat_ekf2ev;
