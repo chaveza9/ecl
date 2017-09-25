@@ -1366,7 +1366,7 @@ void Ekf::calcExtVisRotMat()
 {
 	// calculate the quaternion delta between the EKF and EV reference frames at the EKF fusion time horizon
 	Quatf quat_inv = _ev_sample_delayed.quat.inversed();
-	Quatf q_error =  _state.quat_nominal * quat_inv;
+	Quatf q_error =   quat_inv * _state.quat_nominal;
 	q_error.normalize();
 
 	// convert to a delta angle and apply a spike and low pass filter
@@ -1428,7 +1428,7 @@ void Ekf::resetExtVisRotMat()
 {
 	// calculate the quaternion delta between the EKF and EV reference frames at the EKF fusion time horizon
 	Quatf quat_inv = _ev_sample_delayed.quat.inversed();
-	Quatf q_error =  _state.quat_nominal * quat_inv;
+	Quatf q_error =   quat_inv * _state.quat_nominal;
 	q_error.normalize();
 
 	// convert to a delta angle and reset
