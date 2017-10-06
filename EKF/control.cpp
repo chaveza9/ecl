@@ -131,8 +131,30 @@ void Ekf::controlFusionModes()
 	// Additional data from an external vision sensor can also be fused.
 	controlExternalVisionFusion();
 
+	// handle the case where we do not have enough sensor data to constrain attitude drift
+	const uint32_t max_time_us = 10E6;
+	if ((_time_last_imu - _time_last_gps > max_time_us)
+			&& (_time_last_imu - _time_last_airspeed > max_time_us)
+			&& (_time_last_imu - _time_last_optflow > max_time_us)
+			&& (_time_last_imu - _time_last_ext_vision > max_time_us)
+			&& _control_status.flags.gps) {
+		// if we don't have a source of aiding to constrain attitude drift,
+		// then we need to switch to the non-aiding mode, zero the velocity states
+		// and set the synthetic GPS position to the current estimate
+		_control_status.flags.gps = false;
+		_control_status.flags.ev_pos = false;
+		_control_status.flags.opt_flow = false;
+		_control_status.flags.wind = false;
+		_last_known_posNE(0) = _state.pos(0);
+		_last_known_posNE(1) = _state.pos(1);
+		_state.vel.setZero();
+		ECL_WARN("EKF measurement timeout - stopping navigation");
+
+	}
+
 	// report dead reckoning if we are no longer fusing measurements that constrain velocity drift
 	_is_dead_reckoning = (_time_last_imu - _time_last_pos_fuse > _params.no_aid_timeout_max)
+			&& (_time_last_imu - _time_last_delpos_fuse > _params.no_aid_timeout_max)
 			&& (_time_last_imu - _time_last_vel_fuse > _params.no_aid_timeout_max)
 			&& (_time_last_imu - _time_last_of_fuse > _params.no_aid_timeout_max);
 
@@ -161,16 +183,16 @@ void Ekf::controlExternalVisionFusion()
 				// reset the position if we are not already aiding using GPS, else use a relative position
 				// method for fusing the position data
 				if (_control_status.flags.gps) {
-					_hpos_odometry = true;
+					_fuse_hpos_as_odom = true;
 
 				} else {
 					resetPosition();
 					resetVelocity();
 					// we cannot use an absolue position from a rotating reference frame
 					if (_params.fusion_mode & MASK_ROTATE_EV) {
-						_hpos_odometry = true;
+						_fuse_hpos_as_odom = true;
 					} else {
-						_hpos_odometry = false;
+						_fuse_hpos_as_odom = false;
 					}
 
 				}
@@ -257,8 +279,46 @@ void Ekf::controlExternalVisionFusion()
 
 			// if GPS data is being used, then use an incremental position fusion method for EV data
 			if (_control_status.flags.gps) {
-				_hpos_odometry = true;
+				_fuse_hpos_as_odom = true;
 			}
+
+			if(_fuse_hpos_as_odom) {
+				if(!_hpos_prev_available) {
+					// no previous observation available to calculate position change
+					_fuse_pos = false;
+					_hpos_prev_available = true;
+
+				} else {
+					// calculate the change in position since the last measurement
+					Vector3f ev_delta_pos = _ev_sample_delayed.posNED - _pos_meas_prev;
+
+					// rotate measurement into body frame if required
+					if (_params.fusion_mode & MASK_ROTATE_EV) {
+						ev_delta_pos = _ev_rot_mat * ev_delta_pos;
+					}
+
+					// use the change in position since the last measurement
+					_vel_pos_innov[3] = _state.pos(0) - _hpos_pred_prev(0) - ev_delta_pos(0);
+					_vel_pos_innov[4] = _state.pos(1) - _hpos_pred_prev(1) - ev_delta_pos(1);
+
+				}
+
+				// record observation and estimate for use next time
+				_pos_meas_prev = _ev_sample_delayed.posNED;
+				_hpos_pred_prev(0) = _state.pos(0);
+				_hpos_pred_prev(1) = _state.pos(1);
+
+			} else {
+				// use the absolute position
+				_vel_pos_innov[3] = _state.pos(0) - _ev_sample_delayed.posNED(0);
+				_vel_pos_innov[4] = _state.pos(1) - _ev_sample_delayed.posNED(1);
+			}
+
+			// observation 1-STD error
+			_posObsNoiseNE = fmaxf(_ev_sample_delayed.posErr, 0.01f);
+
+			// innovation gate size
+			_posInnovGateNE = fmaxf(_params.ev_innov_gate, 1.0f);
 		}
 
 		// Fuse available NED position data into the main filter
@@ -278,7 +338,7 @@ void Ekf::controlExternalVisionFusion()
 	// handle the case when we are relying on ev data and lose it
 	if (_control_status.flags.ev_pos && !_control_status.flags.gps && !_control_status.flags.opt_flow) {
 		// We are relying on ev aiding to constrain drift so after 5s without aiding we need to do something
-		if ((_time_last_imu - _time_last_pos_fuse > 5e6)) {
+		if ((_time_last_imu - _time_last_pos_fuse > 5e6) && (_time_last_imu - _time_last_delpos_fuse > 5e6)) {
 			// Switch to the non-aiding mode, zero the velocity states
 			// and set the synthetic position to the current estimate
 			_control_status.flags.ev_pos = false;
@@ -454,11 +514,15 @@ void Ekf::controlGpsFusion()
 		}
 
 		// handle the case when we now have GPS, but have not been using it for an extended period
-		if (_control_status.flags.gps && !_control_status.flags.opt_flow) {
-			// We are relying on GPS aiding to constrain attitude drift so after 7 seconds without aiding we need to do something
-			bool do_reset = (_time_last_imu - _time_last_pos_fuse > _params.no_gps_timeout_max) && (_time_last_imu - _time_last_vel_fuse > _params.no_gps_timeout_max);
+		if (_control_status.flags.gps) {
+			// We are relying on aiding to constrain drift so after a specified time
+			// with no aiding we need to do something
+			bool do_reset = (_time_last_imu - _time_last_pos_fuse > _params.no_gps_timeout_max)
+					&& (_time_last_imu - _time_last_delpos_fuse > _params.no_gps_timeout_max)
+					&& (_time_last_imu - _time_last_vel_fuse > _params.no_gps_timeout_max)
+					&& (_time_last_imu - _time_last_of_fuse > _params.no_gps_timeout_max);
 
-			// Our position measurments have been rejected for more than 14 seconds
+			// We haven't had an abosolute position fix for a longer time so need to do something
 			do_reset |= _time_last_imu - _time_last_pos_fuse > 2 * _params.no_gps_timeout_max;
 
 			if (do_reset) {
@@ -500,21 +564,17 @@ void Ekf::controlGpsFusion()
 			_gps_sample_delayed.pos(1) -= pos_offset_earth(1);
 			_gps_sample_delayed.hgt += pos_offset_earth(2);
 
-		}
-
-	} else {
-		// handle the case where we do not have GPS and have not been using it for an extended period, but are still relying on it
-		if ((_time_last_imu - _time_last_gps > 10e6) && (_time_last_imu - _time_last_airspeed > 1e6) && (_time_last_imu - _time_last_optflow > 1e6) && _control_status.flags.gps) {
-			// if we don't have a source of aiding to constrain attitude drift,
-			// then we need to switch to the non-aiding mode, zero the velocity states
-			// and set the synthetic GPS position to the current estimate
-			_control_status.flags.gps = false;
-			_last_known_posNE(0) = _state.pos(0);
-			_last_known_posNE(1) = _state.pos(1);
-			_state.vel.setZero();
-			ECL_WARN("EKF measurement timeout - stopping navigation");
+			// we are using GPS measurements
+			float lower_limit = fmaxf(_params.gps_pos_noise, 0.01f);
+			float upper_limit = fmaxf(_params.pos_noaid_noise, lower_limit);
+			_posObsNoiseNE = math::constrain(_gps_sample_delayed.hacc, lower_limit, upper_limit);
+			_vel_pos_innov[3] = _state.pos(0) - _gps_sample_delayed.pos(0);
+			_vel_pos_innov[4] = _state.pos(1) - _gps_sample_delayed.pos(1);
+			_posInnovGateNE = fmaxf(_params.posNE_innov_gate, 1.0f);
+			_fuse_hpos_as_odom = false;
 
 		}
+
 	}
 }
 
@@ -1278,6 +1338,17 @@ void Ekf::controlVelPosFusion()
 	    && ((_time_last_imu - _time_last_fake_gps > 2e5) || _fuse_height)) {
 		_fuse_pos = true;
 		_time_last_fake_gps = _time_last_imu;
+
+		if (_control_status.flags.in_air && _control_status.flags.tilt_align) {
+			_posObsNoiseNE = fmaxf(_params.pos_noaid_noise, _params.gps_pos_noise);
+		} else {
+			_posObsNoiseNE = 0.5f;
+		}
+		_vel_pos_innov[3] = _state.pos(0) - _last_known_posNE(0);
+		_vel_pos_innov[4] = _state.pos(1) - _last_known_posNE(1);
+
+		// glitch protection is not required so set gate to a large value
+		_posInnovGateNE = 100.0f;
 
 	}
 

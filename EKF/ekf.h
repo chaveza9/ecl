@@ -247,8 +247,11 @@ private:
 	bool _fuse_hor_vel{false};	///< true when gps horizontal velocity measurement should be fused
 	bool _fuse_vert_vel{false};	///< true when gps vertical velocity measurement should be fused
 
+	float _posObsNoiseNE;		///< 1-STD observtion noise used for the fusion of NE position data (m)
+	float _posInnovGateNE;		///< Number of standard deviations used for the NE position fusion innovation consistency check
+
 	// variables used when position data is being fused using a relative position odometry model
-	bool _hpos_odometry{false};		///< true when the NE position data is being fused using an odometry assumption
+	bool _fuse_hpos_as_odom{false};		///< true when the NE position data is being fused using an odometry assumption
 	Vector3f _pos_meas_prev;		///< previous value of NED position measurement fused using odometry assumption (m)
 	Vector2f _hpos_pred_prev;		///< previous value of NE position state used by odometry fusion (m)
 	bool _hpos_prev_available{false};	///< true when previous values of the estimate and measurement are available for use
@@ -268,6 +271,7 @@ private:
 	uint64_t _time_last_fake_gps{0};	///< last time we faked GPS position measurements to constrain tilt errors during operation without external aiding (uSec)
 
 	uint64_t _time_last_pos_fuse{0};	///< time the last fusion of horizontal position measurements was performed (uSec)
+	uint64_t _time_last_delpos_fuse{0};	///< time the last fusion of incremental horizontal position measurements was performed (uSec)
 	uint64_t _time_last_vel_fuse{0};	///< time the last fusion of velocity measurements was performed (uSec)
 	uint64_t _time_last_hgt_fuse{0};	///< time the last fusion of height measurements was performed (uSec)
 	uint64_t _time_last_of_fuse{0};		///< time the last fusion of optical flow measurements were performed (uSec)
